@@ -18,7 +18,11 @@ class RingCache
         begin
           unless cache_value.index.nil?
             searcher.seek!(cache_value.index)
-            searcher.unset!
+
+            if searcher.current === cache_value
+              searcher.unset!
+            end
+
             cache_value.hits += 1
           end
 
