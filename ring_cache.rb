@@ -4,8 +4,32 @@ class RingCache
 
   def initialize(size = 64)
     @hash = Hash.new(EMPTY)
+    @hash_semaphore = Mutex.new
     @buffer = RingBuffer.new(size)
     @writer = @buffer.iterator
+    @cache_queue = Queue.new
+
+    @cache_manager = Thread.new do
+      searcher = @buffer.iterator
+
+      while message = @cache_queue.pop
+        action, cache_value = message
+
+        begin
+          unless cache_value.index.nil?
+            searcher.seek!(cache_value.index)
+            searcher.unset!
+            cache_value.hits += 1
+          end
+
+          unless action == :evict
+            overwrite_current(cache_value)
+          end
+        rescue
+          puts "ERROR: #{$!}"
+        end
+      end
+    end
   end
 
   def get(key)
@@ -16,34 +40,63 @@ class RingCache
       set(key, calculated)
     else
       # promote hit value
-      @buffer.iterator(stored.index).unset!
-      overwrite_current(stored)
-      stored.hits += 1
+      @cache_queue.push([:promote, stored])
       stored.value
     end
   end
 
   def set(key, value)
     cache_value = CacheValue.new(key, value)
-    overwrite_current(cache_value)
-    @hash[key] = cache_value
-    value
-  end
 
-  def overwrite_current(cache_value)
-    if @writer.set?
-      # evicting a stale value
-      evictee = @writer.unset!
-      @hash.delete(evictee.key)
+    @hash_semaphore.synchronize do
+      existing = @hash[key]
+
+      unless existing === EMPTY
+        @cache_queue.push([:evict, existing])
+      end
+
+      @hash[key] = cache_value
+      @cache_queue.push([:set, cache_value])
     end
 
-    @writer.set(cache_value)
-    cache_value.index = @writer.index
-    @writer.next
+    value
   end
 
   def to_s
     @writer.inspect
+  end
+
+  private
+
+  def overwrite_current(cache_value)
+    if @writer.set?
+      # going to overwrite so evict 20% of the buffer for locking efficiency
+      housekeeper = @writer.clone
+      entries_to_remove = [(@buffer.size * 0.2).to_i, 1].max
+
+      @hash_semaphore.synchronize do
+        entries_to_remove.times do
+          next unless housekeeper.set?
+          evict(housekeeper)
+          housekeeper.next
+        end
+      end
+    end
+
+    cache_value.index = @writer.index
+    @writer.set(cache_value)
+    @writer.next
+  end
+
+  def evict(iterator)
+    # evicting a stale value
+    evictee = iterator.current
+
+    if @hash[evictee.key] === evictee
+      @hash.delete(evictee.key)
+    end
+
+    iterator.unset!
   end
 
   class CacheValue
@@ -66,7 +119,10 @@ class RingCache
 
   class RingBuffer
 
+    attr_reader :size
+
     def initialize(size)
+      @size = size
       @buffer = Array.new(size, RingCache::EMPTY)
     end
 
@@ -93,9 +149,13 @@ class RingCache
         @current_index
       end
 
-      def next
-        @current_index = next_index
+      def seek!(value)
+        @current_index = safe_index(value)
         current
+      end
+
+      def next
+        seek! next_index
       end
 
       def peek
@@ -146,9 +206,17 @@ class RingCache
 
       private
 
+      def set_index(value)
+        @current_index = value
+        current
+      end
+
       def next_index
-        next_index = @current_index + 1
-        next_index % @buffer.size
+        safe_index(@current_index + 1)
+      end
+
+      def safe_index(value)
+        value % @buffer.size
       end
 
     end

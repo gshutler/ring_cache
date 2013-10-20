@@ -67,12 +67,22 @@ describe RingCache do
         subject.set(value, value)
       end
 
+      # give the eviction chance to occur
+      sleep 0.1
+
       subject.get(:value) do
         calls += 1
         value
       end
 
       assert_equal 1, calls
+    end
+
+    it "replaces existing values with the same key" do
+      subject.set(:value, 1)
+      subject.set(:value, 2)
+
+      assert_equal 2, subject.get(:value)
     end
 
   end
