@@ -59,7 +59,7 @@ class RingCache
         @cache_queue.push([:evict, existing])
       end
 
-      @hash[key] = cache_value
+      @hash = @hash.merge(key => cache_value)
       @cache_queue.push([:set, cache_value])
     end
 
@@ -79,28 +79,29 @@ class RingCache
       entries_to_remove = [(@buffer.size * 0.2).to_i, 1].max
 
       @hash_semaphore.synchronize do
+        modified_hash = @hash.dup
+
         entries_to_remove.times do
           next unless housekeeper.set?
-          evict(housekeeper)
+
+          # evicting a stale value
+          evictee = housekeeper.current
+
+          if modified_hash[evictee.key] === evictee
+            modified_hash.delete(evictee.key)
+          end
+
+          housekeeper.unset!
           housekeeper.next
         end
+
+        @hash = modified_hash
       end
     end
 
     cache_value.index = @writer.index
     @writer.set(cache_value)
     @writer.next
-  end
-
-  def evict(iterator)
-    # evicting a stale value
-    evictee = iterator.current
-
-    if @hash[evictee.key] === evictee
-      @hash.delete(evictee.key)
-    end
-
-    iterator.unset!
   end
 
   class CacheValue
